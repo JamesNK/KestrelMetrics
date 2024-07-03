@@ -1,0 +1,185 @@
+﻿@page "/chaos"
+@using System.Net
+@rendermode InteractiveServer
+
+@inject IHttpMessageHandlerFactory HttpMessageHandlerFactory
+@inject ILogger<Chaos> Logger
+
+<PageTitle>Chaos</PageTitle>
+
+<h1>Chaos</h1>
+
+<button class="btn btn-primary" @onclick="StartSlowloris">Slowloris</button>
+
+<button class="btn btn-primary" @onclick="StartMaxConcurrentConnections">Exceed max connections</button>
+
+<button class="btn btn-primary" @onclick="StartMaxRequestSize">Exceed max request size</button>
+
+<br />
+<br />
+<ul>
+    @foreach (var item in _messages)
+    {
+        <li>
+            @item
+        </li>
+    }
+</ul>
+
+@code {
+    private List<string> _messages = new List<string>();
+    private HttpClient _httpClient = default!;
+
+    protected override void OnInitialized()
+    {
+        var httpHandler = HttpMessageHandlerFactory.CreateHandler("shared");
+        _httpClient = new HttpClient(httpHandler);
+        _httpClient.BaseAddress = new Uri("https://apiservice");
+    }
+
+    private async Task StartSlowloris()
+    {
+        const int RequestCount = 50;
+
+        _messages.Clear();
+        _messages.Add($"Sending {RequestCount} POST requests without sending request body.");
+
+        var sendTasks = new List<Task<HttpResponseMessage?>>();
+        for (var i = 0; i < RequestCount; i++)
+        {
+            var content = new SlowStreamingHttpContext();
+
+            sendTasks.Add(Task.Run<HttpResponseMessage?>(async () =>
+            {
+                try
+                {
+                    var httpRequestMessage = new HttpRequestMessage(HttpMethod.Post, "/login");
+                    httpRequestMessage.Content = content;
+
+                    return await _httpClient.SendAsync(httpRequestMessage);
+                }
+                catch { }
+                return null;
+            }));
+        }
+
+        _messages.Add("Requests sent. Waiting for server...");
+
+        try
+        {
+            var responses = await Task.WhenAll(sendTasks);
+            _messages.Add("Done.");
+            foreach (var item in responses)
+            {
+                item?.Dispose();
+            }
+        }
+        catch (Exception ex)
+        {
+            _messages.Add(ex.ToString());
+        }
+    }
+
+    private async Task StartMaxConcurrentConnections()
+    {
+        const int CreatedConnections = 150;
+
+        _messages.Clear();
+        _messages.Add($"Sending {CreatedConnections} POST requests their own connection.");
+
+        var sendTasks = new List<Task<HttpResponseMessage?>>();
+        var handlers = new List<HttpMessageHandler>();
+        for (var i = 0; i < CreatedConnections; i++)
+        {
+            var httpHandler = HttpMessageHandlerFactory.CreateHandler("client" + i);
+            var httpClient = new HttpClient(httpHandler);
+            httpClient.BaseAddress = new Uri("https://apiservice");
+
+            handlers.Add(httpHandler);
+
+            var httpRequestMessage = new HttpRequestMessage(HttpMethod.Get, "/hang?delay=5");
+            httpRequestMessage.Version = HttpVersion.Version20;
+
+            sendTasks.Add(Task.Run<HttpResponseMessage?>(async () =>
+            {
+                try
+                {
+                    return await httpClient.SendAsync(httpRequestMessage);
+                }
+                catch { }
+                return null;
+            }));
+        }
+
+        _messages.Add($"Connections created. Waiting for server...");
+
+        try
+        {
+            var responses = await Task.WhenAll(sendTasks);
+            _messages.Add("Done.");
+            foreach (var item in responses)
+            {
+                item?.Dispose();
+            }
+        }
+        catch (Exception ex)
+        {
+            _messages.Add(ex.ToString());
+        }
+        finally
+        {
+            Logger.LogInformation("Disposing all clients.");
+            foreach (var handler in handlers)
+            {
+                // HttpClientFactory adds a handler that doesn't dispose internal handlers.
+                // We want to force the handlers to be disposed.
+                ((DelegatingHandler) handler).InnerHandler!.Dispose();
+            }
+        }
+    }
+
+    private async Task StartMaxRequestSize()
+    {
+        const int RequestCount = 50;
+        const int RequestBodySize = 1024 * 1024 * 2;
+
+        _messages.Clear();
+        _messages.Add($"Sending {RequestCount} POST requests with {RequestBodySize/1024}KB request body.");
+
+        var data = new byte[RequestBodySize];
+
+        var sendTasks = new List<Task<HttpResponseMessage?>>();
+        for (var i = 0; i < RequestCount; i++)
+        {
+            var content = new ByteArrayContent(data);
+            sendTasks.Add(Task.Run<HttpResponseMessage?>(async () =>
+            {
+                try
+                {
+                    var httpRequestMessage = new HttpRequestMessage(HttpMethod.Post, "/login");
+                    httpRequestMessage.Content = content;
+
+                    return await _httpClient.SendAsync(httpRequestMessage);
+                }
+                catch { }
+                return null;
+            }));
+        }
+
+        _messages.Add("Requests sent. Waiting for server...");
+
+        try
+        {
+            var responses = await Task.WhenAll(sendTasks);
+            _messages.Add("Done.");
+            foreach (var item in responses)
+            {
+                item?.Dispose();
+            }
+        }
+        catch (Exception ex)
+        {
+            _messages.Add(ex.ToString());
+        }
+    }
+}
